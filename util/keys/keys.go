@@ -53,7 +53,101 @@ func (c *Controller) Attach() {
 	c.App.SetInputCapture(c.handle)
 }
 
+// in ui/keys/keys.go
 func (c *Controller) handle(ev *tcell.EventKey) *tcell.EventKey {
+	// 1) Printable keys first (portable)
+	if r := ev.Rune(); r != 0 {
+		switch r {
+		case 'q', 'Q':
+			// quick & safe on UI thread
+			if c.StopReader != nil {
+				c.StopReader()
+			}
+			if c.StopProducer != nil {
+				c.StopProducer()
+			}
+			c.App.Stop()
+			return nil
+
+		case 'r', 'R':
+			// 1) Stop reader (fast)
+			if c.StopReader != nil {
+				c.StopReader()
+			}
+
+			// 2) Update UI directly (we're on the app goroutine inside InputCapture)
+			c.MsgView.Clear()
+			c.MsgView.ScrollToEnd()
+			helper.UpdateStatus(c.Status, "[blue]Reader: RESTARTING...[-]", false) // must NOT queue/draw
+
+			// 3) Restart reader in background; post back with QueueUpdate (no Draw)
+			go func() {
+				if c.StartReader != nil {
+					c.StartReader() // contains small time.Sleep, ok
+				}
+				c.App.QueueUpdate(func() {
+					helper.UpdateStatus(c.Status, "[green]Reader: RUNNING[-]", false)
+				})
+				// (optional) if you really want an immediate repaint, do ONE of these from outside any queued fn:
+				// c.App.Draw()  // ONLY if you're certain you're on the app goroutine. From goroutines, don't call Draw.
+			}()
+			return nil
+
+		case 'c', 'C':
+			c.MsgView.Clear()
+			c.MsgView.ScrollToEnd()
+			helper.UpdateStatus(c.Status, "[blue]Messages: CLEARED[-]", false)
+			return nil
+
+		case 'p', 'P':
+			// start/stop producer can touch nets/ctx -> do in bg
+			if c.ProducerPaused != nil && *c.ProducerPaused {
+				go func() {
+					if c.StartProducer != nil {
+						c.StartProducer()
+					}
+					*c.ProducerPaused = false
+
+					c.App.QueueUpdate(func() {
+						helper.UpdateStatus(c.Status, "[magenta]Producer: STARTED[-]", false)
+					})
+				}()
+			} else {
+				go func() {
+					if c.StopProducer != nil {
+						c.StopProducer()
+					}
+					if c.ProducerPaused != nil {
+						*c.ProducerPaused = true
+					}
+					c.App.QueueUpdate(func() {
+						helper.UpdateStatus(c.Status, "[magenta]Producer: PAUSED[-]", false)
+					})
+				}()
+			}
+			return nil
+
+		case 'd', 'D':
+			// network/delete may block -> background
+			go func() {
+				if c.DeleteTopic != nil {
+					if err := c.DeleteTopic(); err != nil {
+						c.App.QueueUpdate(func() {
+							helper.UpdateStatus(c.Status, fmt.Sprintf("[red]Delete failed: %v[-]", err), false)
+						})
+					} else {
+						c.App.QueueUpdate(func() {
+							helper.UpdateStatus(c.Status, "[red]Topic DELETED[-]", false)
+						})
+					}
+				}
+			}()
+			return nil
+		}
+		return ev
+	}
+
+	// 2) Navigation keys (cheap; OK on UI thread)
 	switch ev.Key() {
 	case tcell.KeyUp:
 		row, _ := c.MsgView.GetScrollOffset()
@@ -72,71 +166,5 @@ func (c *Controller) handle(ev *tcell.EventKey) *tcell.EventKey {
 		c.MsgView.ScrollToEnd()
 		return nil
 	}
-
-	switch ev.Rune() {
-	case 'q', 'Q':
-		// shutdown in order
-		if c.StopReader != nil {
-			c.StopReader()
-		}
-		if c.StopProducer != nil {
-			c.StopProducer()
-		}
-		c.App.Stop()
-		return nil
-
-	case 'r', 'R':
-		// restart reader and clear view
-		if c.StopReader != nil {
-			c.StopReader()
-		}
-		c.App.QueueUpdateDraw(func() {
-			c.MsgView.Clear()
-			c.MsgView.ScrollToEnd()
-		})
-		if c.StartReader != nil {
-			c.StartReader()
-		}
-		helper.UpdateStatus(c.Status, "[blue]Reader: RESTARTED[-]", false)
-		return nil
-
-	case 'c', 'C':
-		c.App.QueueUpdateDraw(func() {
-			c.MsgView.Clear()
-			c.MsgView.ScrollToEnd()
-		})
-		helper.UpdateStatus(c.Status, "[blue]Messages: CLEARED[-]", false)
-		return nil
-
-	case 'p', 'P':
-		// toggle producer
-		if c.ProducerPaused != nil && *c.ProducerPaused {
-			if c.StartProducer != nil {
-				c.StartProducer()
-			}
-			*c.ProducerPaused = false
-			helper.UpdateStatus(c.Status, "[magenta]Producer: STARTED[-]", false)
-		} else {
-			if c.StopProducer != nil {
-				c.StopProducer()
-			}
-			if c.ProducerPaused != nil {
-				*c.ProducerPaused = true
-			}
-			helper.UpdateStatus(c.Status, "[magenta]Producer: PAUSED[-]", false)
-		}
-		return nil
-
-	case 'd', 'D':
-		if c.DeleteTopic != nil {
-			if err := c.DeleteTopic(); err != nil {
-				helper.UpdateStatus(c.Status, fmt.Sprintf("[red]Delete failed: %v[-]", err), false)
-			} else {
-				helper.UpdateStatus(c.Status, "[red]Topic DELETED[-]", false)
-			}
-		}
-		return nil
-	}
-
 	return ev
 }

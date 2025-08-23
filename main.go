@@ -24,7 +24,8 @@ func main() {
 	}
 	topic := os.Getenv("TOPIC")
 	address := os.Getenv("ADDRESS")
-	producerPaused, err := strconv.ParseBool(os.Getenv("TEST_FLAG")) // false : testing
+	testFlag, err := strconv.ParseBool(os.Getenv("TEST_FLAG"))       // true : testing
+	producerPaused, err := strconv.ParseBool(os.Getenv("TEST_FLAG")) // true : testing
 	if err != nil {
 		panic(fmt.Errorf("error Parsing Env Variables: %w", err))
 	}
@@ -47,7 +48,7 @@ func main() {
 	// ─── Producer (can be toggled off if you only want to *read*) ───────────
 	prodCtx, prodCancel := context.WithCancel(context.Background())
 
-	if !producerPaused {
+	if testFlag {
 		go kafka.Producer(prodCtx, conn, kp, errCh)
 	}
 
@@ -176,9 +177,11 @@ func main() {
 	}()
 
 	// ─── Key-bindings (global) ──────────────────────────────────────────────
+	prodCtx, prodCancel = context.WithCancel(context.Background())
 	startProd := func() {
-		prodCtx, prodCancel = context.WithCancel(context.Background())
-		go kafka.Producer(prodCtx, conn, kp, errCh)
+		if testFlag {
+			go kafka.Producer(prodCtx, conn, kp, errCh)
+		}
 	}
 	stopProd := func() {
 		if prodCancel != nil {
