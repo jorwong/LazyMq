@@ -4,17 +4,31 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"lazyMq.com/util/helper"
+	"lazyMq.com/util/keys"
+	"log"
+	"os"
+	"strconv"
 	"sync/atomic"
 	"time"
 
-	"github.com/gdamore/tcell/v2"
+	"github.com/joho/godotenv"
 	"github.com/rivo/tview"
-	kafka2 "github.com/segmentio/kafka-go"
-
-	"lazyMq/util/kafka"
+	"lazyMq.com/util/kafka"
 )
 
 func main() {
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatal("Error loading .env file")
+	}
+	topic := os.Getenv("TOPIC")
+	address := os.Getenv("ADDRESS")
+	producerPaused, err := strconv.ParseBool(os.Getenv("TEST_FLAG")) // false : testing
+	if err != nil {
+		panic(fmt.Errorf("error Parsing Env Variables: %w", err))
+	}
+
 	app := tview.NewApplication()
 
 	// ─── Channels & Kafka setup ──────────────────────────────────────────────
@@ -22,7 +36,7 @@ func main() {
 	errCh := make(chan error, 4)
 	defer close(errCh)
 
-	kp := kafka.NewKafkaCustom("test-topic", 0, "localhost:9092")
+	kp := kafka.NewKafkaCustom(topic, 0, address)
 
 	conn, err := kp.Connect()
 	if err != nil {
@@ -32,15 +46,18 @@ func main() {
 
 	// ─── Producer (can be toggled off if you only want to *read*) ───────────
 	prodCtx, prodCancel := context.WithCancel(context.Background())
-	go producer(prodCtx, conn, kp, errCh)
+
+	if !producerPaused {
+		go kafka.Producer(prodCtx, conn, kp, errCh)
+	}
 
 	// ─── UI widgets ─────────────────────────────────────────────────────────
-	header := tview.NewTextView().
-		SetTextAlign(tview.AlignCenter).
+	header := tview.NewTextView()
+	header.SetTextAlign(tview.AlignCenter).
 		SetDynamicColors(true).
-		SetText(fmt.Sprintf("[white:blue] Kafka Topic: [green]%s[white] ", kp.Topic)).
+		SetText(fmt.Sprintf("Kafka Topic: [green]%s[white] ", kp.Topic)).
 		SetBorder(true).
-		SetTitle(" LazyMQ - Kafka Visualizer ")
+		SetTitle(" LazyMQ - Kafka Visualizer")
 
 	msgView := tview.NewTextView()
 
@@ -88,7 +105,7 @@ func main() {
 		msgPumpCtx, msgPumpCancel = context.WithCancel(context.Background())
 
 		var msgCount int32
-		reader := kp.NewTailReader([]string{"localhost:9092"}, kp.Topic, 0)
+		reader := kp.TailReader([]string{address}, kp.Topic, 0)
 
 		go func() {
 			for {
@@ -130,13 +147,13 @@ func main() {
 			}
 		}()
 
-		updateStatus(status, "[green]Reader: RUNNING[-]", true)
+		helper.UpdateStatus(status, "[green]Reader: RUNNING[-]", true)
 	}
 
 	stopReader := func() {
 		if readCancel != nil {
 			readCancel()
-			updateStatus(status, "[yellow]Reader: STOPPING...[-]", true)
+			helper.UpdateStatus(status, "[yellow]Reader: STOPPING...[-]", true)
 		}
 		if msgPumpCancel != nil {
 			msgPumpCancel()
@@ -159,76 +176,31 @@ func main() {
 	}()
 
 	// ─── Key-bindings (global) ──────────────────────────────────────────────
-	producerPaused := true
-
-	app.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
-		switch ev.Key() {
-		case tcell.KeyUp:
-			or, _ := msgView.GetScrollOffset()
-			if or > 0 {
-				msgView.ScrollTo(or-1, 0)
-			}
-			return nil
-		case tcell.KeyDown:
-			or, _ := msgView.GetScrollOffset()
-			msgView.ScrollTo(or+1, 0)
-			return nil
-		case tcell.KeyHome:
-			msgView.ScrollToBeginning()
-			return nil
-		case tcell.KeyEnd:
-			msgView.ScrollToEnd()
-			return nil
-		}
-
-		switch ev.Rune() {
-		case 'q', 'Q':
-			// shutdown in order
-			stopReader()
+	startProd := func() {
+		prodCtx, prodCancel = context.WithCancel(context.Background())
+		go kafka.Producer(prodCtx, conn, kp, errCh)
+	}
+	stopProd := func() {
+		if prodCancel != nil {
 			prodCancel()
-			app.Stop()
-			return nil
-
-		case 'r', 'R':
-			// restart reader and clear view
-			stopReader()
-			msgView.Clear()
-			startReader()
-			updateStatus(status, "[blue]Reader: RESTARTED[-]", false)
-			return nil
-
-		case 'c', 'C':
-			msgView.Clear()
-			updateStatus(status, "[blue]Messages: CLEARED[-]", false)
-			return nil
-
-		case 'p', 'P':
-			// toggle producer
-			if producerPaused {
-				prodCtx, prodCancel = context.WithCancel(context.Background())
-				go producer(prodCtx, conn, kp, errCh)
-				producerPaused = false
-				updateStatus(status, "[magenta]Producer: STARTED[-]", false)
-			} else {
-				prodCancel()
-				producerPaused = true
-				updateStatus(status, "[magenta]Producer: PAUSED[-]", false)
-			}
-			return nil
-
-		case 'd', 'D':
-			// Dangerous: delete topic (kept since you had it)
-			if err := kp.DeleteTopic(conn, kp.Topic); err != nil {
-				updateStatus(status, fmt.Sprintf("[red]Delete failed: %v[-]", err), false)
-			} else {
-				updateStatus(status, "[red]Topic DELETED[-]", false)
-			}
-			return nil
 		}
-		return ev
-	})
+	}
+	deleteTopic := func() error {
+		return kp.DeleteTopic(conn, kp.Topic)
+	}
 
-	// Set focus to the message view
+	ctrl := keys.NewController(
+		app,
+		msgView,
+		status,
+		startReader,
+		stopReader,
+		&producerPaused,
+		startProd,
+		stopProd,
+		deleteTopic,
+	)
+	ctrl.Attach() // Set focus to the message view
 	app.SetFocus(msgView)
 
 	if err := app.SetRoot(layout, true).EnableMouse(true).Run(); err != nil {
@@ -242,44 +214,5 @@ func main() {
 	if msgPumpCancel != nil {
 		msgPumpCancel()
 	}
-	prodCancel()
-}
-
-// producer: sends 3 lines per tick
-func producer(ctx context.Context, conn *kafka2.Conn, k *kafka.Kafka, errCh chan<- error) {
-	ticker := time.NewTicker(3 * time.Second) // Slowed down to 3 seconds for better readability
-	defer ticker.Stop()
-
-	counter := 0
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case t := <-ticker.C:
-			messages := []string{
-				fmt.Sprintf("Message %d at %s", counter, t.Format("15:04:05")),
-				fmt.Sprintf("Data payload %d", counter),
-				fmt.Sprintf("Event %d processed", counter),
-			}
-			if err := k.WriteMessages(conn, messages); err != nil {
-				errCh <- fmt.Errorf("producer write failed: %w", err)
-				// continue; if the broker is briefly unavailable, keep trying
-			}
-			counter++
-		}
-	}
-}
-
-// helper: update status line with temporary messages and restore commands
-func updateStatus(tv *tview.TextView, text string, permanent bool) {
-	tv.SetText(text)
-
-	if !permanent {
-		// Show temporary status for 3 seconds, then restore command help
-		go func() {
-			time.Sleep(3 * time.Second)
-			commandsText := "[yellow]Commands:[-] [blue]↑/↓[-] scroll | [blue]r[-] reload | [blue]c[-] clear | [blue]p[-] toggle producer | [blue]d[-] delete topic | [red]q[-] quit"
-			tv.SetText(commandsText)
-		}()
-	}
+	stopProd()
 }
