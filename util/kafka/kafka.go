@@ -1,80 +1,93 @@
+// lazyMq.com/util/kafka/kafka.go
 package kafka
 
 import (
 	"context"
-	"fmt"
-	"github.com/segmentio/kafka-go"
+	"sort"
 	"time"
+
+	"github.com/segmentio/kafka-go"
 )
 
 type Kafka struct {
-	Topic     string
-	partition int
-	address   string
+	Partition int
+	Address   string
 	network   string
-	groupId   string
 }
 
-func NewKafka() *Kafka {
+func NewKafkaCustom(partition int, address string) *Kafka {
 	return &Kafka{
-		Topic:     "test",
-		partition: 0,
-		address:   "localhost:9092",
+		Partition: partition,
+		Address:   address,
 		network:   "tcp",
-	}
-
-}
-
-func NewKafkaCustom(topic string, partition int, address string) *Kafka {
-	return &Kafka{
-		Topic:     topic,
-		partition: partition,
-		network:   "tcp",
-		address:   address,
 	}
 }
 
 func (k *Kafka) Connect() (*kafka.Conn, error) {
-	conn, err := kafka.DialLeader(
-		context.Background(), k.network, k.address, k.Topic, k.partition)
+	return kafka.Dial(k.network, k.Address)
+}
+
+// ---- Admin helpers ---------------------------------------------------------
+
+func (k *Kafka) ListTopics() ([]string, error) {
+	conn, err := k.Connect()
 	if err != nil {
-		fmt.Printf("failed to dial leader: %v\n", err)
 		return nil, err
 	}
-	return conn, nil
+	defer conn.Close()
+
+	parts, err := conn.ReadPartitions()
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]struct{}{}
+	for _, p := range parts {
+		seen[p.Topic] = struct{}{}
+	}
+	topics := make([]string, 0, len(seen))
+	for t := range seen {
+		topics = append(topics, t)
+	}
+	sort.Strings(topics)
+	return topics, nil
 }
 
-func (k *Kafka) WriteMessages(conn *kafka.Conn, msgs []string) error {
-	var err error
-	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-
-	for _, msg := range msgs {
-		_, err = conn.WriteMessages(kafka.Message{Value: []byte(msg)})
-	}
+func (k *Kafka) DeleteTopic(topic string) error {
+	conn, err := k.Connect()
 	if err != nil {
-		fmt.Printf("failed to write messages: %v\n", err)
 		return err
 	}
-
-	return nil
+	defer conn.Close()
+	return conn.DeleteTopics(topic)
 }
+
+// ---- IO helpers ------------------------------------------------------------
 
 func (k *Kafka) TailReader(brokers []string, topic string, partition int) *kafka.Reader {
 	return kafka.NewReader(kafka.ReaderConfig{
 		Brokers:     brokers,
 		Topic:       topic,
 		Partition:   partition,
-		StartOffset: kafka.LastOffset, // <-- start at the end
-		// (optional) set MinBytes/MaxBytes, etc.
+		StartOffset: kafka.LastOffset, // tail
+		MinBytes:    1,
+		MaxBytes:    10e6,
 	})
 }
 
-func (k *Kafka) DeleteTopic(conn *kafka.Conn, topic string) error {
-	err := conn.DeleteTopics(topic)
-
-	if err != nil {
-		return err
+func (k *Kafka) NewWriter(topic string) *kafka.Writer {
+	return &kafka.Writer{
+		Addr:     kafka.TCP(k.Address),
+		Topic:    topic,
+		Balancer: &kafka.LeastBytes{},
+		// Async: false (default) for visibility of errors; set to true if you prefer
+		BatchTimeout: 50 * time.Millisecond,
 	}
+}
 
-	return nil
+func (k *Kafka) Produce(ctx context.Context, w *kafka.Writer, msgs ...string) error {
+	kmsgs := make([]kafka.Message, len(msgs))
+	for i, m := range msgs {
+		kmsgs[i] = kafka.Message{Value: []byte(m)}
+	}
+	return w.WriteMessages(ctx, kmsgs...)
 }

@@ -1,12 +1,14 @@
 package main
 
 import (
+	"lazyMq.com/util/kafka"
 	"log"
 	"os"
 	"strconv"
 
 	"github.com/joho/godotenv"
 	"github.com/rivo/tview"
+	kafka2 "github.com/segmentio/kafka-go"
 
 	"lazyMq.com/ui"
 )
@@ -19,31 +21,23 @@ func main() {
 	testFlag, _ := strconv.ParseBool(os.Getenv("TEST_FLAG"))
 
 	app := tview.NewApplication()
+	client := &kafka2.Client{Addr: kafka2.TCP(addr)} // optional
+	kafkaConn := kafka.NewKafkaCustom(0, addr)
 
-	// Build page
-	page := ui.NewKafkaTopicViewPage(app, topic, addr)
+	viewTopicsPage := ui.NewKafkaListTopics(app, kafkaConn)
+
+	page := ui.NewKafkaTopicViewPage(app, client, kafkaConn, topic, addr)
 	page.ProdEnabled = testFlag
 
-	// Wire into pages
 	pages := tview.NewPages()
-	page.Mount(pages, true)
+	page.Mount(pages, false)
+	page.Start(testFlag)
 
-	// Connect + start
-	page.PumpErrors()
-	page.StartReader()
-	if testFlag {
-		page.StartProducer()
-	}
+	viewTopicsPage.Mount(pages, true)
+	viewTopicsPage.Start()
+	defer page.Close()
 
-	// Keys
-	page.AttachKeys(app)
-	app.SetFocus(page.MessageView)
-
-	// Run
 	if err := app.SetRoot(pages, true).EnableMouse(true).Run(); err != nil {
 		log.Fatal(err)
 	}
-
-	// Cleanup
-	page.Close()
 }
