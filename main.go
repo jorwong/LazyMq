@@ -24,18 +24,22 @@ func main() {
 	client := &kafka2.Client{Addr: kafka2.TCP(addr)} // optional
 	kafkaConn := kafka.NewKafkaCustom(0, addr)
 
-	viewTopicsPage := ui.NewKafkaListTopics(app, kafkaConn)
-
-	page := ui.NewKafkaTopicViewPage(app, client, kafkaConn, topic, addr)
-	page.ProdEnabled = testFlag
-
 	pages := tview.NewPages()
-	page.Mount(pages, false)
-	page.Start(testFlag)
 
-	viewTopicsPage.Mount(pages, true)
-	viewTopicsPage.Start()
-	defer page.Close()
+	viewTopicPage := ui.NewKafkaTopicViewPage(app, client, kafkaConn, topic, addr, pages)
+	viewTopicPage.ProdEnabled = testFlag
+	viewTopicPage.Mount(pages, false) // initially hidden
+
+	openTopic := func(topic string) {
+		viewTopicPage.SetTopic(topic) // your method to change topic
+		viewTopicPage.Restart()       // or Start/reload if that's your API
+		viewTopicPage.Start(testFlag)
+		pages.SwitchToPage(viewTopicPage.PageName())
+	}
+
+	listTopicsPage := ui.NewKafkaListTopics(app, kafkaConn, pages, openTopic)
+	listTopicsPage.Mount(pages, true) // visible first
+	listTopicsPage.Start()
 
 	if err := app.SetRoot(pages, true).EnableMouse(true).Run(); err != nil {
 		log.Fatal(err)

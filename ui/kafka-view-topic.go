@@ -18,6 +18,7 @@ import (
 
 type KafkaTopicViewPage struct {
 	App         *tview.Application
+	Page        *tview.Pages
 	Topic       string
 	Address     string
 	Header      *tview.TextView
@@ -45,7 +46,7 @@ type KafkaTopicViewPage struct {
 	ProdEnabled bool
 }
 
-func NewKafkaTopicViewPage(app *tview.Application, client *kafka2.Client, svc *kafka.Kafka, topic, address string) *KafkaTopicViewPage {
+func NewKafkaTopicViewPage(app *tview.Application, client *kafka2.Client, svc *kafka.Kafka, topic, address string, pages *tview.Pages) *KafkaTopicViewPage {
 	header := tview.NewTextView()
 	header.
 		SetTextAlign(tview.AlignCenter).
@@ -76,6 +77,7 @@ func NewKafkaTopicViewPage(app *tview.Application, client *kafka2.Client, svc *k
 
 	return &KafkaTopicViewPage{
 		App:         app,
+		Page:        pages,
 		Topic:       topic,
 		Address:     address,
 		Header:      header,
@@ -88,7 +90,7 @@ func NewKafkaTopicViewPage(app *tview.Application, client *kafka2.Client, svc *k
 	}
 }
 
-func (p *KafkaTopicViewPage) PageName() string { return "topic:" + p.Topic }
+func (p *KafkaTopicViewPage) PageName() string { return "topic" } // fixed
 
 func (p *KafkaTopicViewPage) Mount(pages *tview.Pages, visible bool) {
 	pages.AddPage(p.PageName(), p.Layout, true, visible)
@@ -96,22 +98,29 @@ func (p *KafkaTopicViewPage) Mount(pages *tview.Pages, visible bool) {
 
 func (p *KafkaTopicViewPage) StartReader() {
 	p.StopReader()
-	time.Sleep(120 * time.Millisecond) // small gap to unwind
+	time.Sleep(120 * time.Millisecond) // let old goroutines unwind
 
-	p.msgCh = make(chan string, 1024)
-	p.readCtx, p.readCancel = context.WithCancel(context.Background())
-	p.msgPumpCtx, p.msgPumpCancel = context.WithCancel(context.Background())
+	// New, per-run state kept local to avoid field races
+	msgCh := make(chan string, 1024)
+	readCtx, readCancel := context.WithCancel(context.Background())
+	pumpCtx, pumpCancel := context.WithCancel(context.Background())
+	reader := p.Svc.HeadReader([]string{p.Address}, p.Topic, 0)
+
+	// Publish handles for StopReader()
+	p.msgCh = msgCh
+	p.readCtx, p.readCancel = readCtx, readCancel
+	p.msgPumpCtx, p.msgPumpCancel = pumpCtx, pumpCancel
+	p.reader = reader
 
 	var count int32
-	p.reader = p.Svc.TailReader([]string{p.Address}, p.Topic, 0)
 
-	// UI pump
-	go func() {
+	// UI pump (reads from the *local* msgCh)
+	go func(ch <-chan string) {
 		for {
 			select {
-			case <-p.msgPumpCtx.Done():
+			case <-pumpCtx.Done():
 				return
-			case m, ok := <-p.msgCh:
+			case m, ok := <-ch:
 				if !ok {
 					return
 				}
@@ -123,28 +132,33 @@ func (p *KafkaTopicViewPage) StartReader() {
 				})
 			}
 		}
-	}()
+	}(msgCh)
 
-	// Reader loop
-	go func() {
-		defer close(p.msgCh)
-		defer p.reader.Close()
+	// Reader loop (writes to the *local* msgCh)
+	go func(ch chan<- string, r *kafka2.Reader, ctx context.Context) {
+		defer close(ch)
+		defer r.Close()
+
 		for {
-			msg, err := p.reader.ReadMessage(p.readCtx)
+			msg, err := r.ReadMessage(ctx)
 			if err != nil {
 				if errors.Is(err, context.Canceled) {
 					return
 				}
-				p.errCh <- fmt.Errorf("read failed: %w", err)
+				// Don’t panic if errCh is closed during shutdown.
+				select {
+				case p.errCh <- fmt.Errorf("read failed: %w", err):
+				default:
+				}
 				return
 			}
 			select {
-			case <-p.readCtx.Done():
+			case <-ctx.Done():
 				return
-			case p.msgCh <- string(msg.Value):
+			case ch <- string(msg.Value):
 			}
 		}
-	}()
+	}(msgCh, reader, readCtx)
 
 	helper.UpdateStatus(p.Status, "[green]Reader: RUNNING[-]", false)
 }
@@ -237,6 +251,9 @@ func (p *KafkaTopicViewPage) AttachKeys(app *tview.Application) {
 		case tcell.KeyEnd:
 			p.MessageView.ScrollToEnd()
 			return nil
+		case tcell.KeyEsc:
+			p.Page.SwitchToPage("List Topics")
+			return nil
 		}
 
 		switch ev.Rune() {
@@ -301,7 +318,6 @@ func (p *KafkaTopicViewPage) Start(testFlag bool) {
 
 	p.AttachKeys(p.App)
 	p.App.SetFocus(p.MessageView)
-
 }
 
 func (p *KafkaTopicViewPage) Close() {
@@ -312,4 +328,14 @@ func (p *KafkaTopicViewPage) Close() {
 		p.writer = nil
 	}
 	close(p.errCh)
+}
+
+func (p *KafkaTopicViewPage) Restart() {
+	p.MessageView.Clear()
+	helper.UpdateStatus(p.Status, "[blue]Reader: RESTARTING...[-]", false)
+	go p.StartReader()
+}
+
+func (p *KafkaTopicViewPage) SetTopic(topic string) {
+	p.Topic = topic
 }

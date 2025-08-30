@@ -61,6 +61,20 @@ func (k *Kafka) DeleteTopic(topic string) error {
 	return conn.DeleteTopics(topic)
 }
 
+func (k *Kafka) CreateTopic(topic string) error {
+	conn, err := k.Connect()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	topicConfig := kafka.TopicConfig{
+		Topic:             topic,
+		NumPartitions:     -1,
+		ReplicationFactor: -1,
+	}
+	return conn.CreateTopics(topicConfig)
+}
+
 // ---- IO helpers ------------------------------------------------------------
 
 func (k *Kafka) TailReader(brokers []string, topic string, partition int) *kafka.Reader {
@@ -69,6 +83,17 @@ func (k *Kafka) TailReader(brokers []string, topic string, partition int) *kafka
 		Topic:       topic,
 		Partition:   partition,
 		StartOffset: kafka.LastOffset, // tail
+		MinBytes:    1,
+		MaxBytes:    10e6,
+	})
+}
+
+func (k *Kafka) HeadReader(brokers []string, topic string, partition int) *kafka.Reader {
+	return kafka.NewReader(kafka.ReaderConfig{
+		Brokers:     brokers,
+		Topic:       topic,
+		Partition:   partition,
+		StartOffset: kafka.FirstOffset, // head
 		MinBytes:    1,
 		MaxBytes:    10e6,
 	})
