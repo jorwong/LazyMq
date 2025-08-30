@@ -135,18 +135,7 @@ func (p *KafkaListTopicsPage) AttachKeys(app *tview.Application) {
 			return nil
 
 		case 'c', 'C':
-			go func() {
-				if err := p.svc.CreateTopic("testing"); err != nil {
-					p.App.QueueUpdateDraw(func() {
-						helper.UpdateStatus(p.Status, "[red]Create Topic error: "+err.Error()+"\n", false)
-					})
-					return
-				}
-				p.App.QueueUpdateDraw(func() {
-					helper.UpdateStatus(p.Status, "[green]Topic Created: testing[-]\n", false)
-				})
-				p.ListTopics() // already runs in a goroutine and uses QueueUpdateDraw safely
-			}()
+			ShowCreateTopicModal(p.App, p.Pages, p.Status, p.svc.CreateTopic, p.ListTopics, p.TopicsView)
 			return nil
 
 		case 'd', 'D':
